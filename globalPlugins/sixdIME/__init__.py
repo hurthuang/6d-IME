@@ -368,7 +368,7 @@ class TogglePrefsDialog(wx.Dialog):
                          style=wx.DEFAULT_DIALOG_STYLE)
         self._result = list(enabled_modes)
         sizer = wx.BoxSizer(wx.VERTICAL)
-        label = wx.StaticText(self, label='選擇 Space+456 循環中包含的點字模式（至少一個）：')
+        label = wx.StaticText(self, label='選擇 456+Space 循環中包含的點字模式（至少一個）：')
         sizer.Add(label, 0, wx.ALL, 8)
         self._checks = {}
         for mode in _ALL_MODES_WITH_OFF:
