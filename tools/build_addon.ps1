@@ -1,4 +1,4 @@
-# build_addon.ps1 - 打包 6d-IME NVDA add-on
+﻿# build_addon.ps1 - 打包 6d-IME NVDA add-on
 # 用法：在 PowerShell 執行此腳本，產生 6d-IME-<version>.nvda-addon
 
 $addonRoot = Split-Path $PSScriptRoot -Parent
