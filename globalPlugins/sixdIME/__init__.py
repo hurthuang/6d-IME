@@ -129,8 +129,7 @@ def _build_nemeth_table(cti_path: str) -> None:
                 if key not in table:
                     table[key] = ch
     except Exception:
-        import log as _log
-        _log.error('6d-IME: 無法 parse nemethdefs.cti', exc_info=True)
+        log.error('6d-IME: 無法 parse nemethdefs.cti', exc_info=True)
 
     # 手動補充／覆蓋（優先於 cti 定義）
     _NEMETH_EXTRA = {
@@ -218,16 +217,26 @@ _PUNCT_IMMEDIATE: set = frozenset(k for k in _PUNCT_SEQ if len(k) >= 2)
 
 
 # ═══════════════════════════════════════════════════════════
-# 六點鍵 VK → bitmask
+# 六點鍵 掃描碼（實體鍵位置）→ bitmask
+#
+# 用掃描碼（scan code）而非虛擬鍵（VK）比對：VK 是作業系統依「目前作用中
+# 的鍵盤配置」把掃描碼翻譯出來的結果，若使用者切到中文（注音）鍵盤配置，
+# 物理上的 F 鍵可能被翻成完全不同的 VK（實測翻成數字鍵 2 的 VK），導致
+# 只認 VK 的比對永遠抓不到。掃描碼代表鍵盤上的實體位置，不受作用中配置
+# 影響，才是這種「抓實體按鍵」場景該用的依據。數值取自標準 PS/2 Set 1
+# 掃描碼，與下面 _DAQIAN_KEY 表中同一批鍵的 scan 值一致。
 # ═══════════════════════════════════════════════════════════
-_BRL_KEY_VK = {
-    0x46: 1 << 0,   # f = 點1
-    0x44: 1 << 1,   # d = 點2
-    0x53: 1 << 2,   # s = 點3
-    0x4A: 1 << 3,   # j = 點4
-    0x4B: 1 << 4,   # k = 點5
-    0x4C: 1 << 5,   # l = 點6
+_BRL_KEY_SCAN = {
+    0x21: 1 << 0,   # F = 點1
+    0x20: 1 << 1,   # D = 點2
+    0x1F: 1 << 2,   # S = 點3
+    0x24: 1 << 3,   # J = 點4
+    0x25: 1 << 4,   # K = 點5
+    0x26: 1 << 5,   # L = 點6
 }
+SCAN_SPACE = 0x39
+SCAN_A     = 0x1E   # A = 點7（Backspace）
+SCAN_SEMI  = 0x27   # ; = 點8（Enter）
 VK_SPACE = 0x20
 
 
@@ -550,7 +559,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def script_toggle_reverse(self, gesture):
         """反向循環切換輸入模式"""
-        self._set_mode(self._next_mode(reverse=True))
+        next_mode = self._next_mode(reverse=True)
+        ui.message(_MODE_NAMES[next_mode])
+        wx.CallLater(150, self._flush_and_set_mode, next_mode)
 
     script_toggle_reverse.category = '六點輸入法'
 
@@ -815,14 +826,21 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._mode = mode
 
     def _flush_before_mode_change(self):
-        """模式切換前清理 plugin 內部緩衝；注音有組字中時先送 Enter commit。"""
+        """模式切換前清理 plugin 內部緩衝；注音有組字中時先確認組字。
+
+        判斷依據是 _ime_composing，不是問 IME 本身：這個系統的注音 IME
+        是 TSF 架構，實測 ImmGetCompositionStringW 不管查哪個視窗、
+        執行緒附著對不對，一律查不到 TSF 的組字內容，這條路走不通。
+        改成完全信任 plugin 自己的追蹤——只要曾經送過音節鍵給 IME
+        （_bopo_inner／_send_daqian_seq 設 True）就代表可能有東西還沒
+        提交，直到這裡送出 Enter 或使用者按空白鍵整句確認才清除。
+        """
         if self._mode == MODE_BOPOMOFO:
             self._brl_buf   = ''
             self._punct_buf = []
             if self._ime_composing:
-                # IME 組字區有字：送 Enter 強制 commit，不影響沒有組字的情況
                 self._ime_composing = False
-                _send_enter_bypass_ime()
+                _send_vk(0x0D, 0x1C)   # VK_RETURN，送給仍關聯中的 IME
         elif self._mode in _ENG_MODES:
             if self._eng_buf:
                 self._eng_buf      = []
@@ -973,8 +991,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # 有修飾鍵（Ctrl / Alt / Win）時完全放行，不干擾快捷鍵
         if self._has_modifier():
             return self._old_kd(vkCode, scanCode, extended, injected)
-        # VK_SPACE：有模式時攔截；一般輸入法時完全放行給 IME
-        if vkCode == VK_SPACE:
+        # Space：有模式時攔截；一般輸入法時完全放行給 IME（用掃描碼比對，見上方說明）
+        if scanCode == SCAN_SPACE:
             if self._mode is not None:
                 self._space_down = True
                 # JKL 全按時按下 space → 設 ready（每次 space 按下都重設，支援連續 toggle）
@@ -983,14 +1001,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 self._clear_key_state(vkCode)
                 return False
             return self._old_kd(vkCode, scanCode, extended, injected)
-        if vkCode == 0x41:   # A = 點7
+        if scanCode == SCAN_A:   # A = 點7
             if self._mode is not None:
                 self._dots_down    |= (1 << 6)
                 self._dots_snapshot = self._dots_down
                 self._dots_any      = True
                 self._clear_key_state(vkCode)
                 return False
-        if vkCode == 0xBA:   # VK_OEM_1 (;) = 點8（所有模式下 Enter）
+        if scanCode == SCAN_SEMI:   # ; = 點8（所有模式下 Enter）
             if self._mode is not None:
                 self._ime_composing = False
                 queueHandler.queueFunction(
@@ -998,9 +1016,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     _send_enter_bypass_ime)
                 return False
         # 六點鍵（fdsjkl）：有模式時攔截；一般輸入法時完全放行給 IME
-        if vkCode in _BRL_KEY_VK:
+        if scanCode in _BRL_KEY_SCAN:
             if self._mode is not None:
-                self._dots_down    |= _BRL_KEY_VK[vkCode]
+                self._dots_down    |= _BRL_KEY_SCAN[scanCode]
                 self._dots_snapshot = self._dots_down
                 self._dots_any      = True
                 self._clear_key_state(vkCode)
@@ -1022,8 +1040,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # 有修飾鍵時完全放行
         if self._has_modifier():
             return self._old_ku(vkCode, scanCode, extended, injected)
-        # VK_SPACE 放開
-        if vkCode == VK_SPACE:
+        # Space 放開
+        if scanCode == SCAN_SPACE:
             if self._mode is None:
                 return self._old_ku(vkCode, scanCode, extended, injected)
             was_down = self._space_down
@@ -1046,7 +1064,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     self._process_space()
             return False
         # 點7(A)
-        if vkCode == 0x41:
+        if scanCode == SCAN_A:
             if self._mode is not None:
                 self._dots_down &= ~(1 << 6)
                 if self._dots_any and self._dots_down == 0:
@@ -1055,13 +1073,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     self._dots_snapshot = 0
                     self._process_cell(bits)
                 return False
-        if vkCode == 0xBA:   # VK_OEM_1 (;)（Enter 已在 keydown 送出，keyup 直接吸掉）
+        if scanCode == SCAN_SEMI:   # ;（Enter 已在 keydown 送出，keyup 直接吸掉）
             if self._mode is not None:
                 return False
-        if vkCode in _BRL_KEY_VK:
+        if scanCode in _BRL_KEY_SCAN:
             if self._mode is None:
                 return self._old_ku(vkCode, scanCode, extended, injected)
-            self._dots_down &= ~_BRL_KEY_VK[vkCode]
+            self._dots_down &= ~_BRL_KEY_SCAN[scanCode]
             if self._dots_any and self._dots_down == 0:
                 self._dots_any      = False
                 bits                = self._dots_snapshot
@@ -1263,6 +1281,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
           C) buf 是純前綴（等韻母）→ 試把 NABCC(bits) 接在 buf 後：
                有效 → 繼續累積；無效 → 錯誤提示清空
         """
+        # 注意：這個函式裡的「送聲調鍵確認音節」動作（不論是走
+        # _send_daqian_seq 還是直接送裸調號）都只是把這個音節加進 IME
+        # 持續累積的詞語組字區，並不是把字送進文件——新酷音/新注音這類
+        # 詞語模式下，組字區會一路累積多個字（例如「之」→「之ㄕ」→
+        # 「知識」）直到真正的整句提交動作（Enter、或視窗失去 IME 焦點）
+        # 才會整串送出。所以這裡刻意不把 _ime_composing 清成 False——
+        # 只要曾經送過音節鍵給 IME，就該一直視為「可能還有東西沒提交」，
+        # 直到 _process_space 的整句確認、_reset_state、或模式切換前的
+        # flush 真正送出提交鍵為止。之前在這裡提早清成 False，導致
+        # _flush_before_mode_change 判斷永遠以為沒有東西要 flush。
         if bits == 1:
             if self._brl_buf:
                 # buf 有內容：音節尚未送出，輕聲確認
@@ -1271,11 +1299,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     _send_vk, *_DAQIAN_KEY[_BITS1_TONE])
                 self._brl_buf      = ''
                 self._just_sent    = False
-                self._ime_composing = False
             elif self._just_sent:
                 # buf 空但剛送出音節：輕聲調號（送大千 '7'）
                 self._just_sent    = False
-                self._ime_composing = False
                 queueHandler.queueFunction(
                     queueHandler.eventQueue,
                     _send_vk, *_DAQIAN_KEY[_BITS1_TONE])
@@ -1292,7 +1318,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             # 調號
             if not self._brl_buf:
                 self._just_sent    = False
-                self._ime_composing = False
                 queueHandler.queueFunction(
                     queueHandler.eventQueue,
                     _send_vk, *_DAQIAN_KEY[td])
@@ -1301,7 +1326,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 # B) 完整命中：先送音節再送調號
                 ks = self._phn[self._brl_buf][0]
                 self._brl_buf      = ''
-                self._ime_composing = False
                 queueHandler.queueFunction(
                     queueHandler.eventQueue,
                     self._send_daqian_seq, ks)
@@ -1503,6 +1527,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._ime_composing = True   # 已送注音鍵，IME 組字區有字
 
     def _error_beep(self):
+        queueHandler.queueFunction(queueHandler.eventQueue, self._error_beep_now)
+
+    @staticmethod
+    def _error_beep_now():
         try:
             winsound.Beep(440, 80)
         except Exception:
@@ -1528,7 +1556,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._nemeth_buf = []
         self._nemeth_sub = False
 
-        NABCC = list(" a1b'k2l@cif/msp\"e3h9o6r\\djg>ntq,*5<-u8v.%[$+x!&;:4|0z7(_?w]#y)=")
         out = []
         i = 0
         while i < len(buf):
@@ -1546,7 +1573,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 # fallback：查 NABCC
                 b = buf[i]
                 if 0 < b < 64:
-                    fb = NABCC[b]
+                    fb = _NABCC[b]
                     if fb != ' ':
                         out.append(fb)
                     else:
