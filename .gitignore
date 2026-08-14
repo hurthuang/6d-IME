@@ -1,0 +1,6 @@
+# Build output
+*.nvda-addon
+
+# Python
+__pycache__/
+*.pyc
