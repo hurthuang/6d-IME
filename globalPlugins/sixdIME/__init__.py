@@ -1121,6 +1121,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             return
 
         # ── 注音模式 ──
+        # 注意：跟 _bopo_inner 一樣，這裡送出的空白鍵只是把目前音節以第1聲
+        # 確認、加進 IME 持續累積的詞語組字區，並不代表字已經送進文件，
+        # 所以不要在這裡清 _ime_composing——理由與 _bopo_inner 開頭的說明
+        # 相同，這裡提早清除同樣會讓切模式前的 flush 邏輯形同虛設。
         if self._brl_buf:
             # 有音節 → 第1聲確認
             queueHandler.queueFunction(
@@ -1128,7 +1132,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 _send_vk, *_DAQIAN_KEY[' '])
             self._brl_buf      = ''
             self._punct_buf    = []
-            self._ime_composing = False
             return
 
         if self._punct_buf:
@@ -1147,11 +1150,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 queueHandler.queueFunction(
                     queueHandler.eventQueue,
                     _send_vk, *_DAQIAN_KEY[' '])
-            self._ime_composing = False
             return
 
         # 完全空白 → 送真實 VK_SPACE（核取方塊勾選）
-        self._ime_composing = False
         queueHandler.queueFunction(
             queueHandler.eventQueue,
             _send_vk, VK_SPACE, 0x39)
