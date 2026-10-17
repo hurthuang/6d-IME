@@ -55,6 +55,7 @@ MODE_BRL_UNICODE= 1   # 直接輸出 Unicode 點字字元 ⠀-⠿
 MODE_COMP8      = 2
 MODE_UEB_G1     = 3
 MODE_UEB_G2     = 4
+MODE_SUODIAN    = 5   # 縮點：聲調用點7、點8、空白加在最後一方
 
 _NO_PENDING = object()   # _pending_mode：沒有排定中的模式切換
 
@@ -65,6 +66,7 @@ _MODE_NAMES = {
     MODE_COMP8:       '電腦點字',
     MODE_UEB_G1:      'UEB一級',
     MODE_UEB_G2:      'UEB二級',
+    MODE_SUODIAN:     '縮點',
 }
 _MODE_TABLES = {
     MODE_COMP8:  'en-us-comp8-ext.utb',
@@ -72,9 +74,11 @@ _MODE_TABLES = {
     MODE_UEB_G2: 'en-ueb-g2.ctb',
 }
 # toggle 循環的完整順序（含 None = 一般輸入法，放最前面）
-_ALL_MODES_WITH_OFF = [None, MODE_BOPOMOFO, MODE_BRL_UNICODE, MODE_COMP8, MODE_UEB_G1, MODE_UEB_G2]
+_ALL_MODES_WITH_OFF = [None, MODE_BOPOMOFO, MODE_SUODIAN, MODE_BRL_UNICODE, MODE_COMP8, MODE_UEB_G1, MODE_UEB_G2]
 # 需要 IME 切換和 table 切換的模式
 _ENG_MODES = frozenset({MODE_COMP8, MODE_UEB_G1, MODE_UEB_G2})
+# 送大千鍵給微軟注音的模式
+_ZH_MODES = frozenset({MODE_BOPOMOFO, MODE_SUODIAN})
 
 
 # ═══════════════════════════════════════════════════════════
@@ -158,6 +162,10 @@ def _build_nemeth_table(cti_path: str) -> None:
 
 # ═══════════════════════════════════════════════════════════
 _NABCC = list(" a1b'k2l@cif/msp\"e3h9o6r\\djg>ntq,*5<-u8v.%[$+x!&;:4|0z7(_?w]#y)=")
+
+# 大千鍵位 → 注音符號（縮點模式念聲母用）
+_DAQIAN_TO_BPMF = dict(zip('1qaz2wsxedcrfv5tgbyhnujm8ik,9ol.0p;/-',
+                           'ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ'))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -310,6 +318,24 @@ def _send_vk(vk: int, scan: int):
     ctypes.windll.user32.SendInput(2, inputs, ctypes.sizeof(_INPUT))
 
 
+# 空白＋點8 只在瀏覽器（含 ViTools 桌面版）送 Ctrl+Shift+Enter，給網頁當快速鍵用
+# （例如點字樂譜練習的「從頭播放」）；其他程式不攔，避免 Word 插入分欄符號之類的副作用。
+_BROWSER_APPS = {'chrome', 'msedge', 'firefox', 'brave', 'opera', 'vivaldi', 'vitools'}
+
+
+def _in_browser():
+    try:
+        import api
+        return api.getFocusObject().appModule.appName in _BROWSER_APPS
+    except Exception:
+        return False
+
+
+def _send_ctrl_shift_enter():
+    from keyboardHandler import KeyboardInputGesture
+    KeyboardInputGesture.fromName('control+shift+enter').send()
+
+
 def _send_enter_bypass_ime():
     """同步：暫時解除前景視窗 IME → 送 VK_RETURN → 恢復 IME。
     在 WH_KEYBOARD_LL hook callback 中直接呼叫（同步），
@@ -375,6 +401,30 @@ def _load_phn_tbl(path):
     except Exception:
         log.error("6d-IME: 無法載入 Phn.tbl", exc_info=True)
     return result
+
+
+def _load_suodian_tbl(path):
+    """縮點表（tools/build_suodian.py 產生）：{((點, 有沒有空白), ...): 大千鍵位}，以及所有前綴。"""
+    table, prefixes = {}, set()
+    try:
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('#') or '\t' not in line:
+                    continue
+                dots, keys = line.rstrip('\n').split('\t', 1)
+                seq = []
+                for part in dots.split('-'):
+                    bits = 0
+                    for ch in part.replace('0', ''):
+                        bits |= 1 << (int(ch) - 1)
+                    seq.append((bits, '0' in part))
+                seq = tuple(seq)
+                table[seq] = keys
+                for i in range(1, len(seq)):
+                    prefixes.add(seq[:i])
+    except Exception:
+        log.error("6d-IME: 無法載入 suodian.tbl", exc_info=True)
+    return table, prefixes
 
 
 # ═══════════════════════════════════════════════════════════
@@ -529,6 +579,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         plugin_dir = os.path.dirname(__file__)
         self._phn = _load_phn_tbl(os.path.join(plugin_dir, 'Phn.tbl'))
         log.info(f"6d-IME v10l: Phn.tbl {len(self._phn)} 筆")
+        self._sd_table, self._sd_prefixes = _load_suodian_tbl(os.path.join(plugin_dir, 'suodian.tbl'))
+        log.info(f"6d-IME: 縮點表 {len(self._sd_table)} 筆")
         log.debug(f"6d-IME: 立即標點集合: {_PUNCT_IMMEDIATE}")
 
         self._mode            = None
@@ -606,7 +658,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             raw = config.conf[self._CFG_SECTION].get(self._CFG_KEY, '')
             if raw:
                 modes = [int(x) for x in raw.split(',') if x.strip().lstrip('-').isdigit()]
-                modes = [m for m in modes if m in (0, 1, 2, 3, 4)]
+                modes = [m for m in modes if m in (0, 1, 2, 3, 4, 5)]
                 if modes:
                     return modes
         except Exception:
@@ -742,12 +794,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def script_display_cycle(self, gesture):
         """點顯器空白＋點456：六點輸入關閉時開啟，開啟時切換到下一個模式。
         長年的使用習慣，不論六點輸入開關都接管（會蓋掉點顯器原本的功能）。"""
-        if self._effective_mode() is None:
+        if self._mode == MODE_SUODIAN and getattr(gesture, 'dots', 0) == 0b111000:
+            self._space_chord(0b111000)   # 縮點模式下空白＋點456 是字（ㄨㄤ一聲）
+        elif self._effective_mode() is None:
             self.script_toggle(gesture)
         else:
             self.script_toggle_cycle(gesture)
 
-    script_display_cycle.__doc__ = '點字顯示器：開啟六點輸入，或切換到下一個模式'
+    script_display_cycle.__doc__ = '點字顯示器：開啟六點輸入，或切換到下一個模式（縮點模式用空白＋點4568）'
     script_display_cycle.category = '六點輸入法'
 
     def script_display_off(self, gesture):
@@ -757,6 +811,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     script_display_off.__doc__ = '點字顯示器：關閉六點輸入'
     script_display_off.category = '六點輸入法'
+
+    def script_display_space_dots(self, gesture):
+        """點顯器空白＋任意點：縮點模式下是一方字（一聲、單方字輕聲）；其他模式見 getScript。"""
+        self._space_chord(getattr(gesture, 'dots', 0))
+
+    script_display_space_dots.__doc__ = '點字顯示器：縮點模式的空白＋點'
+    script_display_space_dots.category = '六點輸入法'
+
+    def script_display_play(self, gesture):
+        """點顯器空白＋點8：瀏覽器裡送 Ctrl+Shift+Enter（其他程式見 getScript，交回點顯器原本的功能）。"""
+        _send_ctrl_shift_enter()
+
+    script_display_play.__doc__ = '點字顯示器：在瀏覽器送出 Ctrl+Shift+Enter（例如點字樂譜練習從頭播放）'
+    script_display_play.category = '六點輸入法'
 
     def script_display_nemeth(self, gesture):
         """點顯器空白＋點134：電腦點字模式下進入 Nemeth 子模式（其他時候見 getScript）。"""
@@ -771,9 +839,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # NVDA 會接著交給點顯器原本的功能
         func = getattr(script, '__func__', None)
         if func is GlobalPlugin.script_display_nemeth and self._mode != MODE_COMP8:
+            # 縮點模式下空白＋點134 是「摸」，其他模式交回點顯器原本的功能
+            return self.script_display_space_dots if self._mode == MODE_SUODIAN else None
+        # 空白＋任意點只在縮點模式接管
+        if func is GlobalPlugin.script_display_space_dots and self._mode != MODE_SUODIAN:
             return None
         # 空白＋點7 只在六點輸入開著時接管
         if func is GlobalPlugin.script_display_off and self._effective_mode() is None:
+            return None
+        # 空白＋點8 只在瀏覽器接管
+        if func is GlobalPlugin.script_display_play and not _in_browser():
             return None
         return script
 
@@ -784,8 +859,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         'kb:NVDA+alt+shift+m':        'nemeth_menu',     # Nemeth 符號選單
         'bk:dots':                    'display_dots',    # 點顯器的單獨點、單獨空白
         'bk:space+dot4+dot5+dot6':    'display_cycle',   # 點顯器空白＋點456
+        'bk:space+dot4+dot5+dot6+dot8': 'display_cycle', # 點顯器空白＋點4568（縮點模式也能切換）
+        'bk:space+dots':              'display_space_dots',  # 點顯器空白＋任意點（只在縮點模式）
         'bk:space+dot1+dot3+dot4':    'display_nemeth',  # 點顯器空白＋點134（只在電腦點字模式）
         'bk:space+dot7':              'display_off',     # 點顯器空白＋點7：關閉（只在六點輸入開著時）
+        'bk:space+dot8':              'display_play',    # 點顯器空白＋點8：Ctrl+Shift+Enter（只在瀏覽器）
     }
 
     def script_nemeth_menu(self, gesture):
@@ -1103,17 +1181,18 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def event_foreground(self, obj, nextHandler):
         # 有些程式可能各自記住輸入法，注音模式下換視窗時再確認一次
-        if self._mode == MODE_BOPOMOFO:
+        if self._mode in _ZH_MODES:
             wx.CallLater(100, self._ensure_ms_bopomofo)
         nextHandler()
 
     def _enter_key(self, send_newline, *args):
         """點8／鍵盤 ; 的 Enter。注音組字區還有字時跟一般按 Enter 一樣：
         先交給 IME 確定組字，再按一次才換行。其他時候用 send_newline 繞過 IME 換行。"""
-        if self._mode == MODE_BOPOMOFO and self._ime_composing:
+        if self._mode in _ZH_MODES and self._ime_composing:
             self._ime_composing = False
             self._brl_buf   = ''
             self._punct_buf = []
+            self._sd_buf    = []
             queueHandler.queueFunction(queueHandler.eventQueue, _send_vk, 0x0D, 0x1C)   # VK_RETURN 給 IME
             return
         self._ime_composing = False
@@ -1129,9 +1208,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         （_bopo_inner／_send_daqian_seq 設 True）就代表可能有東西還沒
         提交，直到這裡送出 Enter 或使用者按空白鍵整句確認才清除。
         """
-        if self._mode == MODE_BOPOMOFO:
+        if self._mode in _ZH_MODES:
             self._brl_buf   = ''
             self._punct_buf = []
+            self._sd_buf    = []
             if self._ime_composing:
                 self._ime_composing = False
                 _send_vk(0x0D, 0x1C)   # VK_RETURN，送給仍關聯中的 IME
@@ -1264,6 +1344,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._eng_buf_text  = ''
         self._nemeth_sub    = False
         self._nemeth_buf    = []
+        self._sd_buf        = []      # 縮點：等第二方的第一方（聲母）
         # 清除點字顯示器的 untranslated 狀態
         try:
             brailleInput.handler.untranslatedBraille = ''
@@ -1297,9 +1378,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 self._chord_key_down(bit=1 << 6)
                 self._clear_key_state(vkCode)
                 return False
-        if scanCode == SCAN_SEMI:   # ; = 點8（所有模式下 Enter）
+        if scanCode == SCAN_SEMI:   # ; = 點8：單獨放開＝Enter，也可以和點、空白一起按（縮點、空白＋點8）
             if self._mode is not None:
-                self._enter_key(_send_enter_bypass_ime)
+                self._chord_key_down(bit=1 << 7)
+                self._clear_key_state(vkCode)
                 return False
         # 六點鍵（fdsjkl）：有模式時攔截；一般輸入法時完全放行給 IME
         if scanCode in _BRL_KEY_SCAN:
@@ -1324,19 +1406,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # 有修飾鍵時完全放行
         if self._has_modifier():
             return self._old_ku(vkCode, scanCode, extended, injected)
-        if scanCode == SCAN_SEMI:   # ;（Enter 已在 keydown 送出，keyup 直接吸掉）
-            if self._mode is not None:
-                return False
-        if scanCode == SCAN_SPACE or scanCode == SCAN_A or scanCode in _BRL_KEY_SCAN:
-            pressed = self._space_down if scanCode == SCAN_SPACE else bool(
-                self._dots_down & (1 << 6 if scanCode == SCAN_A else _BRL_KEY_SCAN[scanCode]))
+        if scanCode in (SCAN_SPACE, SCAN_A, SCAN_SEMI) or scanCode in _BRL_KEY_SCAN:
+            bit = {SCAN_A: 1 << 6, SCAN_SEMI: 1 << 7}.get(scanCode) or _BRL_KEY_SCAN.get(scanCode, 0)
+            pressed = self._space_down if scanCode == SCAN_SPACE else bool(self._dots_down & bit)
             if not pressed:
                 # 按下時沒被攔截（例如當時是一般輸入法），放開也照常放行
                 return self._old_ku(vkCode, scanCode, extended, injected)
             if scanCode == SCAN_SPACE:
                 self._chord_key_up(space=True)
             else:
-                self._chord_key_up(bit=1 << 6 if scanCode == SCAN_A else _BRL_KEY_SCAN[scanCode])
+                self._chord_key_up(bit=bit)
             return False
         return self._old_ku(vkCode, scanCode, extended, injected)
 
@@ -1380,12 +1459,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self._chord_dots, self._chord_space, self._chord_fired = 0, False, False
 
     def _space_chord(self, dots):
-        if dots == 0b111000:      # 空白＋點456 → 下一個模式
+        """空白＋點（鍵盤和點顯器共用）。縮點模式下空白＋點456 是字（ㄨㄤ一聲），
+        切換模式改用空白＋點4568（所有模式都可以用）。"""
+        if dots == 0b10111000 or (dots == 0b111000 and self._mode != MODE_SUODIAN):
+            # 空白＋點456／4568 → 下一個模式
             queueHandler.queueFunction(queueHandler.eventQueue, self.script_toggle_cycle, None)
-        elif dots == 0b1000000:   # 空白＋A（點7）→ 關閉六點輸入
+        elif dots == 0b1000000:   # 空白＋點7 → 關閉六點輸入
             queueHandler.queueFunction(queueHandler.eventQueue, self.script_display_off, None)
+        elif dots == 0b10000000 and _in_browser():   # 空白＋點8 → 瀏覽器裡送 Ctrl+Shift+Enter
+            queueHandler.queueFunction(queueHandler.eventQueue, _send_ctrl_shift_enter)
         elif dots == 0b1101 and self._mode == MODE_COMP8:   # 空白＋點134 → Nemeth 子模式
             queueHandler.queueFunction(queueHandler.eventQueue, self._nemeth_sub_enter)
+        elif self._mode == MODE_SUODIAN:   # 縮點：空白是一聲（或單方字輕聲的一部分）
+            self._ime_ensure(chinese=True)
+            self._sd_cell(dots, True)
         else:
             # 沒有指令的組合，多半是打字時空白鍵和前一格重疊：照順序送格再送空白
             self._process_cell(dots)
@@ -1395,6 +1482,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # ── 空白鍵 ────────────────────────────────────────────
 
     def _process_space(self):
+        if self._mode == MODE_SUODIAN:
+            self._sd_space()
+            return
         if self._mode in _ENG_MODES:
             # Nemeth 子模式：flush 後退出
             if self._nemeth_sub:
@@ -1463,6 +1553,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             return
         # 點7單獨 = Backspace，點8單獨 = Enter（所有模式均適用）
         if bits == 64:    # 點7
+            if self._mode == MODE_SUODIAN and self._sd_cancel():
+                return
             queueHandler.queueFunction(
                 queueHandler.eventQueue,
                 _send_vk, 0x08, 0x0E)   # VK_BACK, scan=0x0E
@@ -1470,6 +1562,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if bits == 128:   # 點8 → Enter（跟鍵盤 ; 一樣暫時拔掉 IME 送 VK_RETURN；
             # 原本的 KEYEVENTF_UNICODE chr(13) 在新版記事本實測會被吃掉，不會換行）
             self._enter_key(_send_enter_bypass_ime)
+            return
+        if self._mode == MODE_SUODIAN:
+            self._ime_ensure(chinese=True)
+            self._sd_cell(bits, False)
             return
         if self._mode in _ENG_MODES:
             if bits > 255:
@@ -1508,6 +1604,95 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             if bits >= 64:
                 return
             self._process_bopomofo(bits)
+
+    # ── 縮點 ──────────────────────────────────────────────
+    # 每一方是 (點, 有沒有空白)。查 suodian.tbl：完整命中就送大千鍵（含調號）；
+    # 是前綴（兩方字的聲母）就等下一方；都不是才當標點，標點沿用注音模式的 _PUNCT_SEQ。
+    # 標點「！」「）」的第一方剛好是聲母 ㄎ、ㄅ，聲母後面接單獨的空白時才當標點。
+
+    def _sd_cell(self, bits, space):
+        if self._punct_buf:
+            cand = tuple(self._punct_buf) + (bits,)
+            if not space and cand in _PUNCT_PREFIXES:
+                self._punct_buf.append(bits)
+                if cand in _PUNCT_IMMEDIATE:
+                    self._punct_buf = []
+                    self._sd_send_punct(_PUNCT_SEQ[cand])
+                return
+            self._punct_buf = []
+            self._error_beep()
+        seq = tuple(self._sd_buf) + ((bits, space),)
+        keys = self._sd_table.get(seq)
+        if keys:
+            self._sd_buf = []
+            queueHandler.queueFunction(queueHandler.eventQueue, self._send_daqian_seq, keys)
+            return
+        if seq in self._sd_prefixes:
+            self._sd_buf = list(seq)
+            name = self._sd_initial_name(seq)
+            if name:
+                queueHandler.queueFunction(queueHandler.eventQueue, ui.message, name)
+            return
+        if self._sd_buf:
+            # 聲母後面接的不是縮點：提示，再從這一方重新開始
+            self._sd_buf = []
+            self._error_beep()
+            self._sd_cell(bits, space)
+            return
+        if (bits,) in _PUNCT_PREFIXES:
+            if space:
+                # 單方標點和空白一起按到（打太快），照標點送出
+                punct = _PUNCT_SEQ.get((bits,))
+                if punct:
+                    self._sd_send_punct(punct)
+                else:
+                    self._error_beep()
+            else:
+                self._punct_buf = [bits]
+            return
+        self._error_beep()
+
+    def _sd_space(self):
+        """縮點模式下單獨的空白。"""
+        if self._sd_buf:
+            buf, self._sd_buf = self._sd_buf, []
+            punct = _PUNCT_SEQ.get((buf[0][0],)) if len(buf) == 1 and not buf[0][1] else None
+            if punct:
+                self._sd_send_punct(punct)   # 「！」「）」
+            else:
+                self._error_beep()
+            return
+        if self._punct_buf:
+            key, self._punct_buf = tuple(self._punct_buf), []
+            punct = _PUNCT_SEQ.get(key)
+            if punct:
+                self._sd_send_punct(punct)
+            else:
+                self._error_beep()
+            return
+        queueHandler.queueFunction(queueHandler.eventQueue, _send_vk, VK_SPACE, 0x39)
+
+    def _sd_cancel(self):
+        """點7（倒退）時取消還沒送出的第一方或標點；有取消回傳 True。"""
+        if self._sd_buf or self._punct_buf:
+            self._sd_buf, self._punct_buf = [], []
+            queueHandler.queueFunction(queueHandler.eventQueue, ui.message, '取消')
+            return True
+        return False
+
+    @staticmethod
+    def _sd_send_punct(punct):
+        queueHandler.queueFunction(queueHandler.eventQueue, brailleInput.handler.sendChars, punct)
+
+    def _sd_initial_name(self, seq):
+        """等第二方時念出聲母（ㄍ、ㄐ 同一方時兩個都念）。"""
+        firsts = []
+        for k, keys in self._sd_table.items():
+            if k[:len(seq)] == seq and keys:
+                b = _DAQIAN_TO_BPMF.get(keys[0])
+                if b and b not in firsts:
+                    firsts.append(b)
+        return ' '.join(firsts)
 
     # ── 注音/標點分派 ─────────────────────────────────────
 

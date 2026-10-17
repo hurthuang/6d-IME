@@ -183,6 +183,21 @@ def cmd_dots(args):
 		return {"sent": g.id, "identifiers": list(g.identifiers), "noAction": True}
 
 
+def cmd_ids(args):
+	"""只算點字手勢的 identifiers，不執行。參數同 dots。"""
+	class _Gesture(braille.BrailleDisplayGesture, brailleInput.BrailleInputGesture):
+		source = args.get("source", "freedomScientific")
+		model = args.get("model", "Focus40")
+	g = _Gesture()
+	g.dots = int(args.get("dots", 0))
+	g.space = bool(args.get("space", False))
+	keys = ["dot%d" % (i + 1) for i in range(8) if g.dots & (1 << i)]
+	if g.space:
+		keys.append("brailleSpaceBar")
+	g.id = "+".join(keys)
+	return list(g.identifiers)
+
+
 def cmd_profile_names(args):
 	"""每個輸入法的顯示名稱（GetLanguageProfileDescription）。"""
 	import comtypes.client as cc
@@ -346,6 +361,23 @@ def cmd_convmode(args):
 	return {"imeWnd": ime, "mode": send(ime, 0x283, 1, 0)}
 
 
+def cmd_bind(args):
+	"""新增使用者輸入手勢並存檔（等同輸入手勢對話框）：
+	{"gesture": "bk:space+dot8", "module": "globalCommands", "cls": "GlobalCommands", "script": "kb:control+shift+enter"}"""
+	m = inputCore.manager.userGestureMap
+	m.add(args["gesture"], args.get("module", "globalCommands"), args.get("cls", "GlobalCommands"), args["script"])
+	m.save()
+	return {"ok": True}
+
+
+def cmd_unbind(args):
+	"""移除使用者輸入手勢並存檔（參數同 bind）。"""
+	m = inputCore.manager.userGestureMap
+	m.remove(args["gesture"], args.get("module", "globalCommands"), args.get("cls", "GlobalCommands"), args["script"])
+	m.save()
+	return {"ok": True}
+
+
 # 前景保護：設定後，前景視窗類別不符就拒絕送按鍵的指令（避免打進別的程式）
 _guard = {"cls": None}
 _KEY_CMDS = ("dots", "keys", "type")
@@ -369,16 +401,34 @@ def _guard_blocked(cmd):
 	return None
 
 
+def cmd_braille(args):
+	"""目前點顯器的內容與輸出表；{"text": "母"} 則用目前的輸出表轉譯該文字。"""
+	def cells(c):
+		return "".join(chr(0x2800 + x) for x in c)
+	table = braille.handler.table
+	out = {"table": getattr(table, "fileName", str(table))}
+	if args.get("text"):
+		import louisHelper
+		import louis
+		res = louisHelper.translate([table.fileName, "braille-patterns.cti"], args["text"], mode=louis.dotsIO)
+		out["translated"] = cells(res[0])
+	buf = braille.handler.mainBuffer
+	out["rawText"] = getattr(buf, "windowRawText", None) or ""
+	out["cells"] = cells(getattr(buf, "windowBrailleCells", []) or [])
+	return out
+
+
 COMMANDS = {
+	"braille": cmd_braille,
 	"state": cmd_state, "profiles": cmd_profiles, "profile_names": cmd_profile_names,
 	"activate": cmd_activate, "dots": cmd_dots, "spoken": cmd_spoken,
 	"focus": cmd_focus, "type": cmd_type, "text": cmd_text, "reload": cmd_reload,
-	"plugin": cmd_plugin, "keys": cmd_keys, "trace": cmd_trace, "guard": cmd_guard, "convmode": cmd_convmode,
+	"plugin": cmd_plugin, "keys": cmd_keys, "trace": cmd_trace, "guard": cmd_guard, "convmode": cmd_convmode, "bind": cmd_bind, "unbind": cmd_unbind, "ids": cmd_ids,
 }
 
 
 IPC_DIR = os.path.join(os.environ["TEMP"], "sixdDevHarness")
-VERSION = "0.7"
+VERSION = "0.10"
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):

@@ -15,6 +15,7 @@ $include = @(
     "globalPlugins\sixdIME\__init__.py",
     "globalPlugins\sixdIME\tsf.py",
     "globalPlugins\sixdIME\Phn.tbl",
+    "globalPlugins\sixdIME\suodian.tbl",
     "globalPlugins\sixdIME\nemethdefs.cti"
 )
 
