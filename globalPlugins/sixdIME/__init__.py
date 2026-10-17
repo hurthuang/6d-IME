@@ -44,6 +44,8 @@ import wx
 from brailleTables import getTable as getBRLtable
 from logHandler import log
 
+from . import tsf
+
 
 # ═══════════════════════════════════════════════════════════
 # 模式常數
@@ -53,6 +55,8 @@ MODE_BRL_UNICODE= 1   # 直接輸出 Unicode 點字字元 ⠀-⠿
 MODE_COMP8      = 2
 MODE_UEB_G1     = 3
 MODE_UEB_G2     = 4
+
+_NO_PENDING = object()   # _pending_mode：沒有排定中的模式切換
 
 _MODE_NAMES = {
     None:             '一般輸入法',
@@ -377,14 +381,14 @@ def _load_phn_tbl(path):
 # 偏好設定對話框
 # ═══════════════════════════════════════════════════════════
 class TogglePrefsDialog(wx.Dialog):
-    """選擇 JKL+Space 循環中包含哪些點字模式（不含一般輸入法）"""
+    """選擇空白＋點456 循環中包含哪些點字模式（不含一般輸入法）"""
 
     def __init__(self, parent, enabled_modes):
         super().__init__(parent, title='六點輸入法：模式選擇',
                          style=wx.DEFAULT_DIALOG_STYLE)
         self._result = list(enabled_modes)
         sizer = wx.BoxSizer(wx.VERTICAL)
-        label = wx.StaticText(self, label='選擇 456+Space 循環中包含的點字模式（至少一個）：')
+        label = wx.StaticText(self, label='選擇空白＋點456 循環中包含的點字模式（至少一個）：')
         sizer.Add(label, 0, wx.ALL, 8)
         self._checks = {}
         for mode in _ALL_MODES_WITH_OFF:
@@ -531,12 +535,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._saved_brl_table = None
         self._ime_is_chinese  = None   # None=未知, True=中文, False=英數
 
-        self._dots_down     = 0
-        self._dots_snapshot = 0
-        self._dots_any      = False
-        self._space_down       = False   # 空白鍵目前是否按下
-        self._jkl_ready          = False
-        self._jkl_toggle_consumed = False
+        # 鍵盤模擬點字鍵的和弦狀態：空白鍵當第 9 個點字鍵，按的先後順序不影響結果
+        self._dots_down     = 0       # 目前按著的點（bit 0–6）
+        self._space_down    = False   # 空白鍵目前是否按下
+        self._chord_dots    = 0       # 這次和弦累積的點
+        self._chord_space   = False   # 這次和弦有沒有空白鍵
+        self._chord_fired   = False   # 空白＋點組合已經執行過（避免放開時又送一次）
+
+        # 進入注音模式時若自動切到微軟注音，記住原本的輸入法，離開 6d-IME 時切回去
+        self._orig_ime = None
+        self._pending_mode = _NO_PENDING
 
         # 注音緩衝
         self._brl_buf   = ''
@@ -580,6 +588,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         winInputHook.keyDownCallback = self._old_kd
         winInputHook.keyUpCallback   = self._old_ku
         self._restore_brl_table()
+        self._restore_orig_ime(announce=False)
 
     # ── Config 持久化 ────────────────────────────────────
     _CFG_SECTION = '6dIME'
@@ -619,55 +628,68 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         modes = self._enabled_modes
         if not modes:
             return None
-        if self._mode not in modes:
+        cur = self._effective_mode()
+        if cur not in modes:
             # 目前模式不在清單中（例如剛開啟插件）：正向→第一個；反向→最後一個
             return modes[-1] if reverse else modes[0]
-        idx = modes.index(self._mode)
+        idx = modes.index(cur)
         if reverse:
             return modes[idx - 1]           # idx==0 時取 modes[-1]（最後一個）
         else:
             return modes[(idx + 1) % len(modes)]
+
+    def _effective_mode(self):
+        """已排定但還沒切過去的模式優先（連按切換時要從排定的模式往下算）。"""
+        return self._mode if self._pending_mode is _NO_PENDING else self._pending_mode
+
+    def _schedule_mode(self, mode):
+        self._pending_mode = mode
+        wx.CallLater(150, self._flush_and_set_mode, mode)
 
     def script_toggle(self, gesture):
         """開啟/關閉六點輸入（Ctrl+NVDA+7）
         關閉時切到一般輸入法（None）；
         開啟時切到 _enabled_modes 中第一個點字模式。
         """
-        if self._mode is not None:
+        if self._effective_mode() is not None:
             ui.message(_MODE_NAMES[None])
-            wx.CallLater(150, self._flush_and_set_mode, None)
+            self._schedule_mode(None)
         else:
             brl_modes = [m for m in self._enabled_modes if m is not None]
             if brl_modes:
                 next_mode = brl_modes[0]
                 ui.message(_MODE_NAMES[next_mode])
-                wx.CallLater(150, self._flush_and_set_mode, next_mode)
+                self._schedule_mode(next_mode)
             else:
                 ui.message('請先在偏好設定中選擇至少一個點字模式')
 
+    script_toggle.__doc__ = '開啟或關閉六點輸入'
     script_toggle.category = '六點輸入法'
 
     def script_toggle_cycle(self, gesture):
-        """正向循環切換點字輸入模式（JKL+Space）"""
+        """正向循環切換點字輸入模式（空白＋點456）"""
         brl_modes = [m for m in self._enabled_modes if m is not None]
         if not brl_modes:
             return
-        if self._mode not in brl_modes:
+        cur = self._effective_mode()
+        if cur not in brl_modes:
             next_mode = brl_modes[0]
         else:
-            idx = brl_modes.index(self._mode)
+            idx = brl_modes.index(cur)
             next_mode = brl_modes[(idx + 1) % len(brl_modes)]
         ui.message(_MODE_NAMES[next_mode])
-        wx.CallLater(150, self._flush_and_set_mode, next_mode)
+        self._schedule_mode(next_mode)
 
+    script_toggle_cycle.__doc__ = '切換到下一個點字輸入模式'
     script_toggle_cycle.category = '六點輸入法'
 
     def script_toggle_reverse(self, gesture):
         """反向循環切換輸入模式"""
         next_mode = self._next_mode(reverse=True)
         ui.message(_MODE_NAMES[next_mode])
-        wx.CallLater(150, self._flush_and_set_mode, next_mode)
+        self._schedule_mode(next_mode)
 
+    script_toggle_reverse.__doc__ = '切換到上一個輸入模式'
     script_toggle_reverse.category = '六點輸入法'
 
     def script_prefs(self, gesture):
@@ -682,12 +704,18 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             dlg.Destroy()
         wx.CallAfter(_show)
 
+    script_prefs.__doc__ = '開啟六點輸入法的模式設定'
     script_prefs.category = '六點輸入法'
 
+    # ── 點字顯示器的點字鍵 ──────────────────────────────────
+    # NVDA 對所有點顯器送同一組手勢：bk:dots 收到單獨的點和單獨的空白；
+    # 空白＋點是另外的手勢（bk:space+dot…），要個別綁定。
+    # 只接管最少必要的空白＋點組合，其他留給點顯器原本的功能
+    # （例如 Focus 的空白＋點456 原本是 Ctrl+End、空白＋點134 原本是 Alt）。
+
     def script_display_dots(self, gesture):
-        """攔截點字顯示器的格輸入（bk:dots），路由到對應處理函式。
-        支援：純格、純空白、空白+格（組合功能）。
-        一般輸入法模式下只處理 space+dots 組合（toggle 觸發），其他放行。
+        """攔截點字顯示器的單獨點和單獨空白（bk:dots），路由到對應處理函式。
+        一般輸入法模式下交回 NVDA 原本的點字輸入處理。
         """
         dots = getattr(gesture, 'dots', 0)
         space = getattr(gesture, 'space', False)
@@ -695,7 +723,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             # 一般輸入法模式：放行給 NVDA 原生處理
             import scriptHandler
             import globalCommands
-            scriptHandler.queueScript(globalCommands.commands.script_braille_dots, gesture)
+            # bk:dots 也會攔到單獨的點7／點8，要交回 NVDA 原本的
+            # 倒退刪除／Enter／轉譯，不然會被當成一格點字只念出點位。
+            native = {
+                0x40: globalCommands.commands.script_braille_eraseLastCell,
+                0x80: globalCommands.commands.script_braille_enter,
+                0xC0: globalCommands.commands.script_braille_translate,
+            }.get(dots) if not space else None
+            scriptHandler.queueScript(native or globalCommands.commands.script_braille_dots, gesture)
             return
         if space and not dots:
             queueHandler.queueFunction(queueHandler.eventQueue, self._process_space)
@@ -704,12 +739,53 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     script_display_dots.category = '六點輸入法'
 
+    def script_display_cycle(self, gesture):
+        """點顯器空白＋點456：六點輸入關閉時開啟，開啟時切換到下一個模式。
+        長年的使用習慣，不論六點輸入開關都接管（會蓋掉點顯器原本的功能）。"""
+        if self._effective_mode() is None:
+            self.script_toggle(gesture)
+        else:
+            self.script_toggle_cycle(gesture)
+
+    script_display_cycle.__doc__ = '點字顯示器：開啟六點輸入，或切換到下一個模式'
+    script_display_cycle.category = '六點輸入法'
+
+    def script_display_off(self, gesture):
+        """點顯器空白＋點7：關閉六點輸入（六點輸入關閉時見 getScript，交回點顯器原本的功能）。"""
+        if self._effective_mode() is not None:
+            self.script_toggle(gesture)
+
+    script_display_off.__doc__ = '點字顯示器：關閉六點輸入'
+    script_display_off.category = '六點輸入法'
+
+    def script_display_nemeth(self, gesture):
+        """點顯器空白＋點134：電腦點字模式下進入 Nemeth 子模式（其他時候見 getScript）。"""
+        queueHandler.queueFunction(queueHandler.eventQueue, self._nemeth_sub_enter)
+
+    script_display_nemeth.__doc__ = '點字顯示器：電腦點字模式下進入 Nemeth 數學輸入'
+    script_display_nemeth.category = '六點輸入法'
+
+    def getScript(self, gesture):
+        script = super().getScript(gesture)
+        # 空白＋點134 只在電腦點字模式接管；其他時候回傳 None，
+        # NVDA 會接著交給點顯器原本的功能
+        func = getattr(script, '__func__', None)
+        if func is GlobalPlugin.script_display_nemeth and self._mode != MODE_COMP8:
+            return None
+        # 空白＋點7 只在六點輸入開著時接管
+        if func is GlobalPlugin.script_display_off and self._effective_mode() is None:
+            return None
+        return script
+
     __gestures = {
         'kb:NVDA+control+7':          'toggle',          # 開/關六點輸入
         'kb:NVDA+control+shift+7':    'toggle_reverse',  # 反向循環（保留）
         'kb:NVDA+control+8':          'prefs',
         'kb:NVDA+alt+shift+m':        'nemeth_menu',     # Nemeth 符號選單
-        'bk:dots':                    'display_dots',    # 攔截點字顯示器格輸入
+        'bk:dots':                    'display_dots',    # 點顯器的單獨點、單獨空白
+        'bk:space+dot4+dot5+dot6':    'display_cycle',   # 點顯器空白＋點456
+        'bk:space+dot1+dot3+dot4':    'display_nemeth',  # 點顯器空白＋點134（只在電腦點字模式）
+        'bk:space+dot7':              'display_off',     # 點顯器空白＋點7：關閉（只在六點輸入開著時）
     }
 
     def script_nemeth_menu(self, gesture):
@@ -901,12 +977,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _set_mode_silent(self, mode):
         """切換模式但不播報名稱（名稱已在呼叫前播報）。"""
         old = self._mode
+        if self._pending_mode == mode:
+            self._pending_mode = _NO_PENDING
         log.debug(f"6d-IME _set_mode_silent: {old!r} → {mode!r}")
         self._reset_state()
         self._clear_handler_buf()
         if mode is None:
             self._ime_set(chinese=True)
             self._restore_brl_table()
+            self._restore_orig_ime()
             self._mode = None
             return
         if mode in _MODE_TABLES:
@@ -928,7 +1007,117 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         else:  # BOPOMOFO
             self._ime_set(chinese=True)
             self._restore_brl_table()
+            self._ensure_ms_bopomofo()
         self._mode = mode
+
+    # ── 自動切換微軟注音（TSF）──────────────────────────────
+    # 注音模式送的是大千鍵位，前景輸入法必須是微軟注音。
+    # 用 TSF ActivateProfile + FORSESSION 切換（整個工作階段一起切），
+    # 第一次切換時記住原本的輸入法，回到一般輸入法時切回去。
+
+    # 判斷前景程式目前的輸入法：用 NVDA 從前景程式收到的輸入法名稱（就是 NVDA 念的
+    # 「微軟倉頡」）。不能只靠 tsf.get_active()：它查的是 NVDA 自己執行緒的輸入法，
+    # 實測會跟前景程式脫鉤（NVDA 這邊是微軟注音，記事本實際上是倉頡）。
+
+    def _fg_ime_name(self):
+        import NVDAHelper
+        return getattr(NVDAHelper, 'lastLayoutString', None) or None
+
+    def _fg_is_ms_bopomofo(self):
+        name = self._fg_ime_name()
+        if name:
+            return name == tsf.ms_bopomofo_name()
+        return tsf.is_ms_bopomofo(tsf.get_active())
+
+    def _ime_native_mode(self):
+        """前景輸入法設成中文（不是英數）。微軟注音會記住上次的中／英數，
+        切過去可能停在英數。只在進注音模式時補正一次，不是用來切中英。
+        回傳設定後的 conversion mode；失敗回傳 None。"""
+        WM_IME_CONTROL, IMC_GETCONVERSIONMODE, IMC_SETCONVERSIONMODE = 0x283, 1, 2
+        IMC_SETOPENSTATUS, IME_CMODE_NATIVE = 6, 1
+        try:
+            user32, imm32 = ctypes.windll.user32, ctypes.windll.imm32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return None
+
+            class GUITHREADINFO(ctypes.Structure):
+                _fields_ = [('cbSize', ctypes.c_ulong), ('flags', ctypes.c_ulong),
+                            ('hwndActive', ctypes.c_void_p), ('hwndFocus', ctypes.c_void_p),
+                            ('hwndCapture', ctypes.c_void_p), ('hwndMenuOwner', ctypes.c_void_p),
+                            ('hwndMoveSize', ctypes.c_void_p), ('hwndCaret', ctypes.c_void_p),
+                            ('rcCaret', ctypes.c_long * 4)]
+            gti = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+            tid = user32.GetWindowThreadProcessId(hwnd, None)
+            if user32.GetGUIThreadInfo(tid, ctypes.byref(gti)) and gti.hwndFocus:
+                hwnd = gti.hwndFocus
+            imm32.ImmGetDefaultIMEWnd.restype = ctypes.c_void_p
+            ime_wnd = imm32.ImmGetDefaultIMEWnd(ctypes.c_void_p(hwnd))
+            if not ime_wnd:
+                return None
+            send = user32.SendMessageW
+            send.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+            send.restype = ctypes.c_ssize_t
+            mode = send(ime_wnd, WM_IME_CONTROL, IMC_GETCONVERSIONMODE, 0)
+            if not mode & IME_CMODE_NATIVE:
+                send(ime_wnd, WM_IME_CONTROL, IMC_SETOPENSTATUS, 1)
+                send(ime_wnd, WM_IME_CONTROL, IMC_SETCONVERSIONMODE, mode | IME_CMODE_NATIVE)
+                mode = send(ime_wnd, WM_IME_CONTROL, IMC_GETCONVERSIONMODE, 0)
+                log.debug(f'6d-IME: 輸入法設成中文 mode={mode:#x}')
+            return mode
+        except Exception:
+            log.debug('6d-IME: _ime_native_mode 失敗', exc_info=True)
+            return None
+
+    def _ensure_ms_bopomofo(self):
+        if self._fg_is_ms_bopomofo():
+            wx.CallLater(50, self._ime_native_mode)
+            return
+        if not tsf.ms_bopomofo_enabled():
+            ui.message('找不到微軟注音，請在 Windows 語言設定加入微軟注音')
+            return
+        if self._orig_ime is None:
+            name = self._fg_ime_name()
+            orig = tsf.find_by_name(name) if name else None
+            if orig is None:
+                active = tsf.get_active()
+                if active and not tsf.is_ms_bopomofo(active):
+                    orig = active
+            self._orig_ime = orig
+        if tsf.activate_ms_bopomofo():
+            # 切換成功時 NVDA 自己會報新的輸入法名稱，這裡不重複報
+            log.debug(f'6d-IME: 切到微軟注音，原本 {self._orig_ime!r}')
+            wx.CallLater(200, self._ime_native_mode)   # 等切換生效再設中文
+        else:
+            ui.message('無法切換到微軟注音')
+
+    def _restore_orig_ime(self, announce=True):
+        orig, self._orig_ime = self._orig_ime, None
+        if orig is None:
+            return
+        # 使用者在六點輸入期間自己換過輸入法，就不要再改回去
+        if not self._fg_is_ms_bopomofo():
+            return
+        if tsf.activate(orig):
+            log.debug(f'6d-IME: 切回原本的輸入法 {orig!r}')
+
+    def event_foreground(self, obj, nextHandler):
+        # 有些程式可能各自記住輸入法，注音模式下換視窗時再確認一次
+        if self._mode == MODE_BOPOMOFO:
+            wx.CallLater(100, self._ensure_ms_bopomofo)
+        nextHandler()
+
+    def _enter_key(self, send_newline, *args):
+        """點8／鍵盤 ; 的 Enter。注音組字區還有字時跟一般按 Enter 一樣：
+        先交給 IME 確定組字，再按一次才換行。其他時候用 send_newline 繞過 IME 換行。"""
+        if self._mode == MODE_BOPOMOFO and self._ime_composing:
+            self._ime_composing = False
+            self._brl_buf   = ''
+            self._punct_buf = []
+            queueHandler.queueFunction(queueHandler.eventQueue, _send_vk, 0x0D, 0x1C)   # VK_RETURN 給 IME
+            return
+        self._ime_composing = False
+        queueHandler.queueFunction(queueHandler.eventQueue, send_newline, *args)
 
     def _flush_before_mode_change(self):
         """模式切換前清理 plugin 內部緩衝；注音有組字中時先確認組字。
@@ -1066,7 +1255,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self._saved_brl_table = None
 
     def _reset_state(self):
-        # 不清物理按鍵狀態（_dots_down/_dots_any/_space_down 由 keyup 管理）
+        # 不清物理按鍵狀態（_dots_down／_space_down／_chord_* 由 keyup 管理）
         self._brl_buf       = ''
         self._punct_buf     = []
         self._just_sent     = False
@@ -1099,33 +1288,23 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # Space：有模式時攔截；一般輸入法時完全放行給 IME（用掃描碼比對，見上方說明）
         if scanCode == SCAN_SPACE:
             if self._mode is not None:
-                self._space_down = True
-                # JKL 全按時按下 space → 設 ready（每次 space 按下都重設，支援連續 toggle）
-                if self._dots_down == (1 << 3 | 1 << 4 | 1 << 5):
-                    self._jkl_ready = True
+                self._chord_key_down(space=True)
                 self._clear_key_state(vkCode)
                 return False
             return self._old_kd(vkCode, scanCode, extended, injected)
         if scanCode == SCAN_A:   # A = 點7
             if self._mode is not None:
-                self._dots_down    |= (1 << 6)
-                self._dots_snapshot = self._dots_down
-                self._dots_any      = True
+                self._chord_key_down(bit=1 << 6)
                 self._clear_key_state(vkCode)
                 return False
         if scanCode == SCAN_SEMI:   # ; = 點8（所有模式下 Enter）
             if self._mode is not None:
-                self._ime_composing = False
-                queueHandler.queueFunction(
-                    queueHandler.eventQueue,
-                    _send_enter_bypass_ime)
+                self._enter_key(_send_enter_bypass_ime)
                 return False
         # 六點鍵（fdsjkl）：有模式時攔截；一般輸入法時完全放行給 IME
         if scanCode in _BRL_KEY_SCAN:
             if self._mode is not None:
-                self._dots_down    |= _BRL_KEY_SCAN[scanCode]
-                self._dots_snapshot = self._dots_down
-                self._dots_any      = True
+                self._chord_key_down(bit=_BRL_KEY_SCAN[scanCode])
                 self._clear_key_state(vkCode)
                 return False
             return self._old_kd(vkCode, scanCode, extended, injected)
@@ -1145,57 +1324,72 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # 有修飾鍵時完全放行
         if self._has_modifier():
             return self._old_ku(vkCode, scanCode, extended, injected)
-        # Space 放開
-        if scanCode == SCAN_SPACE:
-            if self._mode is None:
-                return self._old_ku(vkCode, scanCode, extended, injected)
-            was_down = self._space_down
-            self._space_down = False
-            if was_down:
-                if self._jkl_ready and self._dots_down == (1 << 3 | 1 << 4 | 1 << 5):
-                    # JKL 全按且 space 已抬起 → 觸發 toggle（JKL 仍按著）
-                    self._jkl_ready = False
-                    self._jkl_toggle_consumed = True
-                    queueHandler.queueFunction(
-                        queueHandler.eventQueue,
-                        self.script_toggle_cycle, None)
-                elif (self._mode == MODE_COMP8
-                      and self._dots_snapshot == 13):   # space+dots134 → Nemeth 子模式
-                    self._dots_snapshot = 0
-                    queueHandler.queueFunction(
-                        queueHandler.eventQueue,
-                        self._nemeth_sub_enter)
-                elif not self._dots_any:
-                    self._process_space()
-            return False
-        # 點7(A)
-        if scanCode == SCAN_A:
-            if self._mode is not None:
-                self._dots_down &= ~(1 << 6)
-                if self._dots_any and self._dots_down == 0:
-                    self._dots_any      = False
-                    bits                = self._dots_snapshot
-                    self._dots_snapshot = 0
-                    self._process_cell(bits)
-                return False
         if scanCode == SCAN_SEMI:   # ;（Enter 已在 keydown 送出，keyup 直接吸掉）
             if self._mode is not None:
                 return False
-        if scanCode in _BRL_KEY_SCAN:
-            if self._mode is None:
+        if scanCode == SCAN_SPACE or scanCode == SCAN_A or scanCode in _BRL_KEY_SCAN:
+            pressed = self._space_down if scanCode == SCAN_SPACE else bool(
+                self._dots_down & (1 << 6 if scanCode == SCAN_A else _BRL_KEY_SCAN[scanCode]))
+            if not pressed:
+                # 按下時沒被攔截（例如當時是一般輸入法），放開也照常放行
                 return self._old_ku(vkCode, scanCode, extended, injected)
-            self._dots_down &= ~_BRL_KEY_SCAN[scanCode]
-            if self._dots_any and self._dots_down == 0:
-                self._dots_any      = False
-                bits                = self._dots_snapshot
-                self._dots_snapshot = 0
-                self._jkl_ready = False
-                if self._jkl_toggle_consumed:
-                    self._jkl_toggle_consumed = False   # 消耗：不送格
-                else:
-                    self._process_cell(bits)
+            if scanCode == SCAN_SPACE:
+                self._chord_key_up(space=True)
+            else:
+                self._chord_key_up(bit=1 << 6 if scanCode == SCAN_A else _BRL_KEY_SCAN[scanCode])
             return False
         return self._old_ku(vkCode, scanCode, extended, injected)
+
+    # ── 鍵盤和弦（空白鍵當第 9 個點字鍵）──────────────────
+    # 點和空白全部放開時才決定送什麼，所以「空白＋點456」「點456＋空白」結果一樣。
+    # 空白＋點的組合在放開任一個鍵時就執行，按住其中一邊再按另一邊可以連續執行
+    # （例如按住 456 連按空白，連續切換模式）。
+
+    def _chord_key_down(self, bit=0, space=False):
+        if self._chord_fired:
+            # 組合已執行過、還有鍵按著：從目前按著的鍵重新開始一組
+            self._chord_fired = False
+            self._chord_dots  = self._dots_down
+            self._chord_space = self._space_down
+        if space:
+            self._space_down  = True
+            self._chord_space = True
+        else:
+            self._dots_down  |= bit
+            self._chord_dots |= bit
+
+    def _chord_key_up(self, bit=0, space=False):
+        if space:
+            self._space_down = False
+        else:
+            self._dots_down &= ~bit
+        if self._mode is None:
+            # 按著鍵的時候六點輸入被關掉：只清狀態，不送任何東西
+            if self._dots_down == 0 and not self._space_down:
+                self._chord_dots, self._chord_space, self._chord_fired = 0, False, False
+            return
+        if self._chord_space and self._chord_dots and not self._chord_fired:
+            self._chord_fired = True
+            self._space_chord(self._chord_dots)
+        if self._dots_down == 0 and not self._space_down:
+            if not self._chord_fired:
+                if self._chord_dots:
+                    self._process_cell(self._chord_dots)
+                elif self._chord_space:
+                    self._process_space()
+            self._chord_dots, self._chord_space, self._chord_fired = 0, False, False
+
+    def _space_chord(self, dots):
+        if dots == 0b111000:      # 空白＋點456 → 下一個模式
+            queueHandler.queueFunction(queueHandler.eventQueue, self.script_toggle_cycle, None)
+        elif dots == 0b1000000:   # 空白＋A（點7）→ 關閉六點輸入
+            queueHandler.queueFunction(queueHandler.eventQueue, self.script_display_off, None)
+        elif dots == 0b1101 and self._mode == MODE_COMP8:   # 空白＋點134 → Nemeth 子模式
+            queueHandler.queueFunction(queueHandler.eventQueue, self._nemeth_sub_enter)
+        else:
+            # 沒有指令的組合，多半是打字時空白鍵和前一格重疊：照順序送格再送空白
+            self._process_cell(dots)
+            self._process_space()
 
 
     # ── 空白鍵 ────────────────────────────────────────────
@@ -1273,10 +1467,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 queueHandler.eventQueue,
                 _send_vk, 0x08, 0x0E)   # VK_BACK, scan=0x0E
             return
-        if bits == 128:   # 點8 → Enter（用 KEYEVENTF_UNICODE 繞過中文 IME）
-            queueHandler.queueFunction(
-                queueHandler.eventQueue,
-                _send_unicode_chars, chr(13))
+        if bits == 128:   # 點8 → Enter（跟鍵盤 ; 一樣暫時拔掉 IME 送 VK_RETURN；
+            # 原本的 KEYEVENTF_UNICODE chr(13) 在新版記事本實測會被吃掉，不會換行）
+            self._enter_key(_send_enter_bypass_ime)
             return
         if self._mode in _ENG_MODES:
             if bits > 255:
@@ -1645,9 +1838,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # ── Nemeth 子模式（comp8 內嵌）────────────────────────
 
     def _nemeth_sub_enter(self):
-        """進入 Nemeth 子模式：先 flush 目前 eng_buf，再報「數學」。"""
+        """進入 Nemeth 子模式：先清掉目前 eng_buf，再報「數學」。"""
         if self._eng_buf:
-            self._eng_translate(False)
+            # 電腦點字每格都已即時送出，只要清緩衝；不能呼叫 _eng_translate(False)，
+            # 沒有新文字時它會把最後一格的點位念出來（多念「點字鍵 1」）
+            self._eng_buf      = []
+            self._eng_buf_text = ''
+            self._eng_sync_display(untranslated_bits=[])
         self._nemeth_sub = True
         self._nemeth_buf = []
         ui.message('數學')

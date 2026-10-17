@@ -13,6 +13,7 @@ $include = @(
     "manifest.ini",
     "README.md",
     "globalPlugins\sixdIME\__init__.py",
+    "globalPlugins\sixdIME\tsf.py",
     "globalPlugins\sixdIME\Phn.tbl",
     "globalPlugins\sixdIME\nemethdefs.cti"
 )
