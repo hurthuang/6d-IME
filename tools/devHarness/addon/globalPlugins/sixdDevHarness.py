@@ -432,8 +432,13 @@ def cmd_braille(args):
 	if args.get("text"):
 		import louisHelper
 		import louis
-		res = louisHelper.translate([table.fileName, "braille-patterns.cti"], args["text"], mode=louis.dotsIO)
+		# 可選 cursor（游標位置，模擬 NVDA 在編輯區的轉譯：會加 compbrlAtCursor）、table（指定點字表）
+		name = args.get("table", table.fileName)
+		cursor = args.get("cursor")
+		mode = louis.dotsIO | (louis.compbrlAtCursor if cursor is not None else 0)
+		res = louisHelper.translate([name, "braille-patterns.cti"], args["text"], cursorPos=cursor, mode=mode)
 		out["translated"] = cells(res[0])
+		out["cursorCell"] = res[3]
 	buf = braille.handler.mainBuffer
 	out["rawText"] = getattr(buf, "windowRawText", None) or ""
 	out["cells"] = cells(getattr(buf, "windowBrailleCells", []) or [])
