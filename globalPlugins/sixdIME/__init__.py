@@ -56,6 +56,9 @@ MODE_COMP8      = 2
 MODE_UEB_G1     = 3
 MODE_UEB_G2     = 4
 MODE_SUODIAN    = 5   # 縮點：聲調用點7、點8、空白加在最後一方
+# 縮點：收到「後面可能還要接空白」的那一方（例：韻母不加空白＝輕聲，但緊接空白＝一聲）時，
+# 最多等這麼久看下一個動作；空白鍵不必和那一方同時按
+SD_HOLD_SECONDS = 0.5
 
 _NO_PENDING = object()   # _pending_mode：沒有排定中的模式切換
 
@@ -581,6 +584,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         log.info(f"6d-IME v10l: Phn.tbl {len(self._phn)} 筆")
         self._sd_table, self._sd_prefixes = _load_suodian_tbl(os.path.join(plugin_dir, 'suodian.tbl'))
         log.info(f"6d-IME: 縮點表 {len(self._sd_table)} 筆")
+        self._sd_lock = threading.Lock()   # _sd_pending 會被鍵盤勾子執行緒和主執行緒存取
+        self._sd_pending = None            # 等下一個動作的音節：(不加空白的大千鍵, 加空白的大千鍵)
+        self._sd_pending_token = 0
         log.debug(f"6d-IME: 立即標點集合: {_PUNCT_IMMEDIATE}")
 
         self._mode            = None
@@ -1188,6 +1194,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _enter_key(self, send_newline, *args):
         """點8／鍵盤 ; 的 Enter。注音組字區還有字時跟一般按 Enter 一樣：
         先交給 IME 確定組字，再按一次才換行。其他時候用 send_newline 繞過 IME 換行。"""
+        if self._mode == MODE_SUODIAN:
+            self._sd_flush()
         if self._mode in _ZH_MODES and self._ime_composing:
             self._ime_composing = False
             self._brl_buf   = ''
@@ -1212,6 +1220,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self._brl_buf   = ''
             self._punct_buf = []
             self._sd_buf    = []
+            pending = self._sd_take_pending()
+            if pending:
+                self._send_daqian_seq(pending[0])   # 等待中的音節先送出，下面的 Enter 才確認得到
             if self._ime_composing:
                 self._ime_composing = False
                 _send_vk(0x0D, 0x1C)   # VK_RETURN，送給仍關聯中的 IME
@@ -1345,6 +1356,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._nemeth_sub    = False
         self._nemeth_buf    = []
         self._sd_buf        = []      # 縮點：等第二方的第一方（聲母）
+        if hasattr(self, '_sd_lock'):
+            with self._sd_lock:
+                self._sd_pending = None
         # 清除點字顯示器的 untranslated 狀態
         try:
             brailleInput.handler.untranslatedBraille = ''
@@ -1461,6 +1475,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _space_chord(self, dots):
         """空白＋點（鍵盤和點顯器共用）。縮點模式下空白＋點456 是字（ㄨㄤ一聲），
         切換模式改用空白＋點4568（所有模式都可以用）。"""
+        if self._mode == MODE_SUODIAN:
+            self._sd_flush()
         if dots == 0b10111000 or (dots == 0b111000 and self._mode != MODE_SUODIAN):
             # 空白＋點456／4568 → 下一個模式
             queueHandler.queueFunction(queueHandler.eventQueue, self.script_toggle_cycle, None)
@@ -1611,6 +1627,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # 標點「！」「）」的第一方剛好是聲母 ㄎ、ㄅ，聲母後面接單獨的空白時才當標點。
 
     def _sd_cell(self, bits, space):
+        self._sd_flush()   # 前一個等待中的音節：下一方來了，照不加空白的聲調送出
         if self._punct_buf:
             cand = tuple(self._punct_buf) + (bits,)
             if not space and cand in _PUNCT_PREFIXES:
@@ -1625,6 +1642,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         keys = self._sd_table.get(seq)
         if keys:
             self._sd_buf = []
+            withSpace = None if space else self._sd_table.get(seq[:-1] + ((bits, True),))
+            if withSpace:
+                # 這一方加空白是另一個聲調（韻母：輕聲／一聲；進階打法：四聲／輕聲），等下一個動作
+                self._sd_hold(keys, withSpace)
+                return
             queueHandler.queueFunction(queueHandler.eventQueue, self._send_daqian_seq, keys)
             return
         if seq in self._sd_prefixes:
@@ -1654,6 +1676,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def _sd_space(self):
         """縮點模式下單獨的空白。"""
+        pending = self._sd_take_pending()
+        if pending:
+            # 緊接在等待中的那一方後面：當成那一方加空白（一聲，或進階打法的輕聲）
+            queueHandler.queueFunction(queueHandler.eventQueue, self._send_daqian_seq, pending[1])
+            return
         if self._sd_buf:
             buf, self._sd_buf = self._sd_buf, []
             punct = _PUNCT_SEQ.get((buf[0][0],)) if len(buf) == 1 and not buf[0][1] else None
@@ -1673,12 +1700,39 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         queueHandler.queueFunction(queueHandler.eventQueue, _send_vk, VK_SPACE, 0x39)
 
     def _sd_cancel(self):
-        """點7（倒退）時取消還沒送出的第一方或標點；有取消回傳 True。"""
-        if self._sd_buf or self._punct_buf:
+        """點7（倒退）時取消還沒送出的第一方、等待中的音節或標點；有取消回傳 True。"""
+        if self._sd_take_pending() or self._sd_buf or self._punct_buf:
             self._sd_buf, self._punct_buf = [], []
             queueHandler.queueFunction(queueHandler.eventQueue, ui.message, '取消')
             return True
         return False
+
+    def _sd_hold(self, keys, keysWithSpace):
+        """音節先不送出，等下一個動作：空白鍵→keysWithSpace；下一方、其他動作或逾時→keys。"""
+        with self._sd_lock:
+            self._sd_pending = (keys, keysWithSpace)
+            self._sd_pending_token += 1
+            token = self._sd_pending_token
+        timer = threading.Timer(SD_HOLD_SECONDS, lambda: queueHandler.queueFunction(
+            queueHandler.eventQueue, self._sd_flush, token))
+        timer.daemon = True
+        timer.start()
+
+    def _sd_take_pending(self, token=None):
+        """取出等待中的音節（token 不同表示已被後來的取代，不取）。"""
+        with self._sd_lock:
+            pending = self._sd_pending
+            if pending is None or (token is not None and token != self._sd_pending_token):
+                return None
+            self._sd_pending = None
+            return pending
+
+    def _sd_flush(self, token=None):
+        """等待中的音節照不加空白的聲調送出。"""
+        pending = self._sd_take_pending(token)
+        if pending:
+            self._ime_composing = True   # 送出前就標記，緊接的 Enter 才會先確認組字
+            queueHandler.queueFunction(queueHandler.eventQueue, self._send_daqian_seq, pending[0])
 
     @staticmethod
     def _sd_send_punct(punct):

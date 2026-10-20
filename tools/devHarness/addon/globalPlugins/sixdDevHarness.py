@@ -322,6 +322,28 @@ def cmd_plugin(args):
 	return out
 
 
+_sentSeqs = []
+
+
+def cmd_sdlog(args):
+	"""記錄 6d-IME 送給 IME 的大千鍵（含調號）：{"start": true} 開始並清空；{} 取回並清空。"""
+	import globalPluginHandler as gph
+	plugin = next(p for p in gph.runningPlugins if type(p).__module__.endswith("sixdIME"))
+	if args.get("start"):
+		if not getattr(plugin, "_harnessOrigSend", None):
+			plugin._harnessOrigSend = plugin._send_daqian_seq
+
+			def wrapped(seq):
+				_sentSeqs.append(seq)
+				return plugin._harnessOrigSend(seq)
+			plugin._send_daqian_seq = wrapped
+		_sentSeqs.clear()
+		return {"ok": True}
+	out = list(_sentSeqs)
+	_sentSeqs.clear()
+	return out
+
+
 def cmd_keys(args):
 	"""依序呼叫 6d-IME 的鍵盤 hook：[["down"|"up", "f"|"space"|...], ...]（模擬實體按鍵，不經過 SendInput）"""
 	import globalPluginHandler as gph
@@ -423,7 +445,7 @@ COMMANDS = {
 	"state": cmd_state, "profiles": cmd_profiles, "profile_names": cmd_profile_names,
 	"activate": cmd_activate, "dots": cmd_dots, "spoken": cmd_spoken,
 	"focus": cmd_focus, "type": cmd_type, "text": cmd_text, "reload": cmd_reload,
-	"plugin": cmd_plugin, "keys": cmd_keys, "trace": cmd_trace, "guard": cmd_guard, "convmode": cmd_convmode, "bind": cmd_bind, "unbind": cmd_unbind, "ids": cmd_ids,
+	"plugin": cmd_plugin, "keys": cmd_keys, "sdlog": cmd_sdlog, "trace": cmd_trace, "guard": cmd_guard, "convmode": cmd_convmode, "bind": cmd_bind, "unbind": cmd_unbind, "ids": cmd_ids,
 }
 
 
