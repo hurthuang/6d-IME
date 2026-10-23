@@ -437,7 +437,7 @@ class TogglePrefsDialog(wx.Dialog):
     """選擇空白＋點456 循環中包含哪些點字模式（不含一般輸入法）"""
 
     def __init__(self, parent, enabled_modes):
-        super().__init__(parent, title='六點輸入法：模式選擇',
+        super().__init__(parent, title='豪點輸入法：模式選擇',
                          style=wx.DEFAULT_DIALOG_STYLE)
         self._result = list(enabled_modes)
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -722,7 +722,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 ui.message('請先在偏好設定中選擇至少一個點字模式')
 
     script_toggle.__doc__ = '開啟或關閉六點輸入'
-    script_toggle.category = '六點輸入法'
+    script_toggle.category = '豪點輸入法'
 
     def script_toggle_cycle(self, gesture):
         """正向循環切換點字輸入模式（空白＋點456）"""
@@ -739,7 +739,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._schedule_mode(next_mode)
 
     script_toggle_cycle.__doc__ = '切換到下一個點字輸入模式'
-    script_toggle_cycle.category = '六點輸入法'
+    script_toggle_cycle.category = '豪點輸入法'
 
     def script_toggle_reverse(self, gesture):
         """反向循環切換輸入模式"""
@@ -748,7 +748,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._schedule_mode(next_mode)
 
     script_toggle_reverse.__doc__ = '切換到上一個輸入模式'
-    script_toggle_reverse.category = '六點輸入法'
+    script_toggle_reverse.category = '豪點輸入法'
 
     def script_prefs(self, gesture):
         """開啟模式選擇偏好對話框"""
@@ -762,8 +762,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             dlg.Destroy()
         wx.CallAfter(_show)
 
-    script_prefs.__doc__ = '開啟六點輸入法的模式設定'
-    script_prefs.category = '六點輸入法'
+    script_prefs.__doc__ = '開啟豪點輸入法的模式設定'
+    script_prefs.category = '豪點輸入法'
 
     # ── 點字顯示器的點字鍵 ──────────────────────────────────
     # NVDA 對所有點顯器送同一組手勢：bk:dots 收到單獨的點和單獨的空白；
@@ -795,20 +795,18 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         elif dots:
             queueHandler.queueFunction(queueHandler.eventQueue, self._process_cell, dots)
 
-    script_display_dots.category = '六點輸入法'
+    script_display_dots.category = '豪點輸入法'
 
     def script_display_cycle(self, gesture):
         """點顯器空白＋點456：六點輸入關閉時開啟，開啟時切換到下一個模式。
         長年的使用習慣，不論六點輸入開關都接管（會蓋掉點顯器原本的功能）。"""
-        if self._mode == MODE_SUODIAN and getattr(gesture, 'dots', 0) == 0b111000:
-            self._space_chord(0b111000)   # 縮點模式下空白＋點456 是字（ㄨㄤ一聲）
-        elif self._effective_mode() is None:
+        if self._effective_mode() is None:
             self.script_toggle(gesture)
         else:
             self.script_toggle_cycle(gesture)
 
-    script_display_cycle.__doc__ = '點字顯示器：開啟六點輸入，或切換到下一個模式（縮點模式用空白＋點4568）'
-    script_display_cycle.category = '六點輸入法'
+    script_display_cycle.__doc__ = '點字顯示器：開啟六點輸入，或切換到下一個模式（空白＋點4568 也可以）'
+    script_display_cycle.category = '豪點輸入法'
 
     def script_display_off(self, gesture):
         """點顯器空白＋點7：關閉六點輸入（六點輸入關閉時見 getScript，交回點顯器原本的功能）。"""
@@ -816,28 +814,28 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self.script_toggle(gesture)
 
     script_display_off.__doc__ = '點字顯示器：關閉六點輸入'
-    script_display_off.category = '六點輸入法'
+    script_display_off.category = '豪點輸入法'
 
     def script_display_space_dots(self, gesture):
         """點顯器空白＋任意點：縮點模式下是一方字（一聲、單方字輕聲）；其他模式見 getScript。"""
         self._space_chord(getattr(gesture, 'dots', 0))
 
     script_display_space_dots.__doc__ = '點字顯示器：縮點模式的空白＋點'
-    script_display_space_dots.category = '六點輸入法'
+    script_display_space_dots.category = '豪點輸入法'
 
     def script_display_play(self, gesture):
         """點顯器空白＋點8：瀏覽器裡送 Ctrl+Shift+Enter（其他程式見 getScript，交回點顯器原本的功能）。"""
         _send_ctrl_shift_enter()
 
     script_display_play.__doc__ = '點字顯示器：在瀏覽器送出 Ctrl+Shift+Enter（例如點字樂譜練習從頭播放）'
-    script_display_play.category = '六點輸入法'
+    script_display_play.category = '豪點輸入法'
 
     def script_display_nemeth(self, gesture):
         """點顯器空白＋點134：電腦點字模式下進入 Nemeth 子模式（其他時候見 getScript）。"""
         queueHandler.queueFunction(queueHandler.eventQueue, self._nemeth_sub_enter)
 
     script_display_nemeth.__doc__ = '點字顯示器：電腦點字模式下進入 Nemeth 數學輸入'
-    script_display_nemeth.category = '六點輸入法'
+    script_display_nemeth.category = '豪點輸入法'
 
     def getScript(self, gesture):
         script = super().getScript(gesture)
@@ -865,7 +863,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         'kb:NVDA+alt+shift+m':        'nemeth_menu',     # Nemeth 符號選單
         'bk:dots':                    'display_dots',    # 點顯器的單獨點、單獨空白
         'bk:space+dot4+dot5+dot6':    'display_cycle',   # 點顯器空白＋點456
-        'bk:space+dot4+dot5+dot6+dot8': 'display_cycle', # 點顯器空白＋點4568（縮點模式也能切換）
+        'bk:space+dot4+dot5+dot6+dot8': 'display_cycle', # 點顯器空白＋點4568（和空白＋點456 相同）
         'bk:space+dots':              'display_space_dots',  # 點顯器空白＋任意點（只在縮點模式）
         'bk:space+dot1+dot3+dot4':    'display_nemeth',  # 點顯器空白＋點134（只在電腦點字模式）
         'bk:space+dot7':              'display_off',     # 點顯器空白＋點7：關閉（只在六點輸入開著時）
@@ -1051,7 +1049,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         wx.CallAfter(_show)
 
-    script_nemeth_menu.category = '六點輸入法'
+    script_nemeth_menu.category = '豪點輸入法'
 
     def _flush_and_set_mode(self, mode):
         """flush 組字區後切換模式（由 wx.CallLater 延後呼叫）。"""
@@ -1473,11 +1471,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self._chord_dots, self._chord_space, self._chord_fired = 0, False, False
 
     def _space_chord(self, dots):
-        """空白＋點（鍵盤和點顯器共用）。縮點模式下空白＋點456 是字（ㄨㄤ一聲），
-        切換模式改用空白＋點4568（所有模式都可以用）。"""
+        """空白＋點（鍵盤和點顯器共用）。空白＋點456／4568 切換模式（縮點規則 v0.3 起一聲不加空白，
+        縮點模式也能用空白＋點456）；縮點模式的其他組合是進階打法的一聲、輕聲。"""
         if self._mode == MODE_SUODIAN:
             self._sd_flush()
-        if dots == 0b10111000 or (dots == 0b111000 and self._mode != MODE_SUODIAN):
+        if dots in (0b111000, 0b10111000):
             # 空白＋點456／4568 → 下一個模式
             queueHandler.queueFunction(queueHandler.eventQueue, self.script_toggle_cycle, None)
         elif dots == 0b1000000:   # 空白＋點7 → 關閉六點輸入
