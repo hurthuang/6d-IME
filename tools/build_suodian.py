@@ -1,10 +1,11 @@
-"""從 Phn.tbl 依縮點規則產生縮點表，並可和高點的 chi.key 比對。
+"""從 Phn.tbl 依縮點規則產生縮點打法表。
 
-縮點規則（構想：hurt；高點實作：高生旺）：
-  聲調用第 7、8 點與空白鍵加在最後一方：一聲加空白、二聲加點7、三聲加點7+8、四聲加點8、輕聲不加
-  單方字（只有一方的音節）輕聲加點8 再加空白
-  進階：玻坡摸佛（ㄛ）、的特呢了哥科喝（ㄜ）、之吃失日資疵司（空韻）省略韻母，聲調加在聲母那一方；
-        輕聲一樣加點8 再加空白
+縮點規則 v0.3（構想：hurt；2020 年高點曾實作早期版本）：讀打一致，打法和縮點閱讀相同
+  一聲不加；二聲韻母加點7；三聲韻母加點7、8；四聲韻母加點8；輕聲聲母加點8
+  沒有聲母的字：二、三、四聲一方（韻母加點）；一聲、輕聲照國語點字打兩方（韻母、調號方 3 或 1）
+  進階（只用在打字）：玻坡摸佛（ㄛ）、的特呢了哥科喝（ㄜ）、之吃失日資疵司（空韻）省略韻母，只打聲母那一方：
+        一聲加空白、二聲加點7、三聲加點7、8、四聲加點8、輕聲加點8 和空白
+  （v0.2 以前：一聲加空白、輕聲不加、單方字輕聲加點8 和空白；--compare 和高點的 chi.key 比對的是舊規則）
 用法：
   python build_suodian.py                 產生 globalPlugins/sixdIME/suodian.tbl
   python build_suodian.py --compare chi.key   和 chi.key 比對
@@ -41,21 +42,46 @@ def with_tone(cell, tone):
             4: (cell | DOT8, False), 5: (cell, False)}[tone]
 
 
-def build(phn):
+TONE_CELL = {1: 0b100, 5: 0b1}   # 國語點字的調號方：一聲點3、輕聲點1
+
+
+def reading(cells, tone):
+    """縮點閱讀的寫法（v0.3 起也是打法）：[(點, False), ...]。cells：聲母?、韻母。"""
+    *ini, fin = cells
+    if not ini:
+        if tone in (1, 5):   # 沒有聲母的一聲、輕聲不縮：韻母＋調號方
+            return [(fin, False), (TONE_CELL[tone], False)]
+        return [(fin | {2: DOT7, 3: DOT7 | DOT8, 4: DOT8}[tone], False)]
+    out = [(c, False) for c in ini]
+    if tone == 5:
+        out[0] = (out[0][0] | DOT8, False)   # 輕聲：聲母加點8
+    elif tone in (2, 3, 4):
+        fin |= {2: DOT7, 3: DOT7 | DOT8, 4: DOT8}[tone]
+    return out + [(fin, False)]
+
+
+def build(phn, conflicts=None):
     """{((點, 空白), ...): 大千鍵位含調號}"""
     table = {}
+
+    def put(seq, keys):
+        if seq in table and table[seq] != keys and conflicts is not None:
+            conflicts.append((seq, table[seq], keys))
+        table.setdefault(seq, keys)
+
     for cells, key, mask in phn:
         for tone in range(1, 6):
-            last = with_tone(cells[-1], tone)
-            if tone == 5 and len(cells) == 1:
-                # 單方字的輕聲加點8 再加空白：只打一方會和標點的第一方撞在一起（例：345＋空白＝〉）
-                last = (cells[0] | DOT8, True)
-            seq = tuple((c, False) for c in cells[:-1]) + (last,)
-            table.setdefault(seq, key + TONE_KEY[tone])
+            if str(tone) not in mask:
+                continue   # Phn.tbl 的第三欄是這個音節實際有的聲調（5＝輕聲）；不存在的讀音不產生，免得多出歧義（例：ㄐㄧ˙）
+            put(tuple(reading(cells, tone)), key + TONE_KEY[tone])
             if key in ADVANCED:
                 init = cells[0]
                 adv = (init | DOT8, True) if tone == 5 else with_tone(init, tone)
-                table.setdefault((adv,), key + TONE_KEY[tone])
+                put((adv,), key + TONE_KEY[tone])
+    # 代名詞：縮點閱讀的聲母帶區分記號（他 1247、她 1248、你 13457、妳 13458），照讀法打也可以；
+    # 選到哪個字仍由微軟注音決定（牠、祂的記號在韻母上，會和聲調撞在一起，照 ㄊㄚ 一般打法打）
+    for dots, keys in (('1247-345', 'w8 '), ('1248-345', 'w8 '), ('13457-1678', 'su3'), ('13458-1678', 'su3')):
+        put(parse_key(dots), keys)
     return table
 
 
@@ -79,7 +105,8 @@ def parse_key(s):
 
 def main():
     phn = load_phn(os.path.join(PLUGIN, 'Phn.tbl'))
-    table = build(phn)
+    conflicts = []
+    table = build(phn, conflicts)
     if '--compare' in sys.argv:
         sys.stdout.reconfigure(encoding='utf-8')
         path = sys.argv[sys.argv.index('--compare') + 1]
@@ -108,7 +135,10 @@ def main():
         fh.write('# 點位（0＝空白，- 分隔每一方）\t大千鍵位（含調號）\n')
         for seq in sorted(table, key=fmt):
             fh.write(f'{fmt(seq)}\t{table[seq]}\n')
-    print(f'寫入 {out}：{len(table)} 筆')
+    print(f'寫入 {out}：{len(table)} 筆；同一個點位對到不同注音（照 Phn.tbl 順序取第一個）{len(conflicts)} 筆')
+    sys.stdout.reconfigure(encoding='utf-8')
+    for seq, a, b in conflicts[:20]:
+        print(f'   {fmt(seq)}	{a!r} / {b!r}')
 
 
 if __name__ == '__main__':
