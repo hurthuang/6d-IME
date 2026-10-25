@@ -76,7 +76,7 @@ NVDA 附加元件，提供六點點字鍵盤多模式輸入，支援注音點字
 
 ### 縮點（實驗）
 
-調號併入第 7、8 點的注音點字，每個字少打一方。規則 v0.3 起**讀打一致**：打法和 [NVDA-brailleTableSwitcher](https://github.com/hurthuang/NVDA-brailleTableSwitcher) 的「縮點閱讀」相同，讀到什麼就打什麼。預設不在循環清單裡，要在偏好設定（Ctrl+NVDA+8）勾選。
+調號併入第 7、8 點的注音點字，每個字少打一方。規則 v0.3 起**讀打一致**：打法和 [NVDA-brailleTableSwitcher](https://github.com/hurthuang/NVDA-brailleTableSwitcher)（1.3.0 起）的「縮點閱讀」相同，讀到什麼就打什麼。預設不在循環清單裡，要在偏好設定（Ctrl+NVDA+8）勾選。
 
 | 字 | 打法 | 例 |
 |------|------|----|
@@ -97,7 +97,7 @@ NVDA 附加元件，提供六點點字鍵盤多模式輸入，支援注音點字
 - 科 123、玻 135 的進階一聲要和空白鍵同時按：按完再按空白是標點「！」「）」。
 - 代名詞可以照閱讀的寫法打（他 1247、345），也可以不打記號（124、345）；選到他或她、你或妳由微軟注音決定。
 
-完整規則與對照：[縮點對照](https://hurthuang.github.io/vi-tools/zh-tw-short.html)。構想見[注音點字改良思考](https://class.kh.edu.tw/19061/bulletin/msg_view/197)（2018）、[縮點輸入法](https://class.kh.edu.tw/19061/bulletin/msg_view/497)（2020，高生旺老師的「高點」曾實作早期版本，當時一聲加空白、輕聲不加）。
+完整規則與對照表之後會放在 [vi-tools](https://hurthuang.github.io/vi-tools/)。構想見[注音點字改良思考](https://class.kh.edu.tw/19061/bulletin/msg_view/197)（2018）、[縮點輸入法](https://class.kh.edu.tw/19061/bulletin/msg_view/497)（2020，高生旺老師的「高點」曾實作早期版本，當時一聲加空白、輕聲不加）。
 
 ### 黑點點字
 
