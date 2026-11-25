@@ -12,6 +12,8 @@ $outFile = Join-Path $addonRoot "6d-IME-$version.nvda-addon"
 $include = @(
     "manifest.ini",
     "README.md",
+    "LICENSE",
+    "locale\zh_TW\manifest.ini",
     "globalPlugins\sixdIME\__init__.py",
     "globalPlugins\sixdIME\tsf.py",
     "globalPlugins\sixdIME\Phn.tbl",
